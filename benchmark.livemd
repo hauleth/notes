@@ -1,0 +1,339 @@
+# Benchmark
+
+## Section
+
+```elixir
+Mix.install([
+  {:benchee, ">= 0.0.0"},
+  {:ecto_sql, "~> 3.0"},
+  {:postgrex, ">= 0.0.0"}
+])
+```
+
+```elixir
+defmodule Rand do
+  @random_max 10_000
+
+  def id, do: :rand.uniform(@random_max)
+
+  def random_but(not_this_value) do
+    case :rand.uniform(@random_max) do
+      ^not_this_value -> random_but(not_this_value)
+      new_value -> new_value
+    end
+  end
+end
+```
+
+```elixir
+defmodule T.Current do
+  def run(count, repo) do
+    1..count
+    |> parallel(fn _ ->
+      repo.checkout(fn ->
+        world = repo.get(World, Rand.id())
+
+        repo.update(world, randomnumber: Rand.random_but(world.randomnumber))
+      end)
+    end)
+  end
+
+  defp parallel(collection, func) do
+    collection
+    |> Enum.map(&Task.async(fn -> func.(&1) end))
+    |> Enum.map(&Task.await(&1))
+  end
+end
+```
+
+```elixir
+defmodule T.CurrentExsp do
+  def run(count, repo) do
+    1..count
+    |> parallel(fn _ ->
+      :rand.seed(:exsp)
+
+      repo.checkout(fn ->
+        world = repo.get(World, Rand.id())
+
+        repo.update(world, randomnumber: Rand.random_but(world.randomnumber))
+      end)
+    end)
+  end
+
+  defp parallel(collection, func) do
+    collection
+    |> Enum.map(&Task.async(fn -> func.(&1) end))
+    |> Enum.map(&Task.await(&1))
+  end
+end
+```
+
+```elixir
+defmodule T.AsyncStream do
+  def run(count, repo) do
+    1..count
+    |> Task.async_stream(
+      fn _ ->
+        repo.checkout(fn ->
+          world = repo.get(World, Rand.id())
+
+          repo.update(world, randomnumber: Rand.random_but(world.randomnumber))
+        end)
+      end,
+      max_concurrency: 40,
+      ordered: false,
+      timeout: :infinity
+    )
+    |> Enum.map(fn {:ok, world} -> world end)
+  end
+end
+```
+
+```elixir
+defmodule T.SyncExsp do
+  def run(count, repo) do
+    :rand.seed(:exsp)
+
+    1..count
+    |> Stream.map(fn _ -> Rand.id() end)
+    |> Stream.map(fn idx -> repo.get(World, idx) end)
+    |> Stream.map(fn world -> {world, Rand.random_but(world.randomnumber)} end)
+    |> Enum.each(fn {world, num} -> repo.update(world, randomnumber: num) end)
+  end
+end
+```
+
+```elixir
+defmodule T.AsyncExsp do
+  def run(count, repo) do
+    :rand.seed(:exsp)
+
+    1..count
+    |> Stream.map(fn _ -> Rand.id() end)
+    |> Task.async_stream(fn idx -> repo.get(World, idx) end, ordered: false)
+    |> Stream.map(fn {:ok, world} -> {world, Rand.random_but(world.randomnumber)} end)
+    |> Enum.each(fn {world, num} -> repo.update(world, randomnumber: num) end)
+  end
+end
+```
+
+```elixir
+defmodule T.SyncExspUpdateTransaction do
+  def run(count, repo) do
+    :rand.seed(:exsp)
+
+    stream =
+      1..count
+      |> Stream.map(fn _ -> Rand.id() end)
+      |> Stream.map(fn idx -> repo.get(World, idx) end, ordered: false)
+      |> Stream.map(fn {:ok, world} -> {world, Rand.random_but(world.randomnumber)} end)
+
+    repo.checkout(fn ->
+      Enum.each(stream, fn {world, num} -> repo.update(world, randomnumber: num) end)
+    end)
+  end
+end
+```
+
+```elixir
+defmodule T.AsyncExspUpdateTransaction do
+  def run(count, repo) do
+    :rand.seed(:exsp)
+
+    stream =
+      1..count
+      |> Stream.map(fn _ -> Rand.id() end)
+      |> Task.async_stream(fn idx -> repo.get(World, idx) end, ordered: false)
+      |> Stream.map(fn {:ok, world} -> {world, Rand.random_but(world.randomnumber)} end)
+
+    repo.checkout(fn ->
+      Enum.each(stream, fn {world, num} -> repo.update(world, randomnumber: num) end)
+    end)
+  end
+end
+```
+
+```elixir
+defmodule T.AsyncExspInsertAll do
+  def run(count, repo) do
+    :rand.seed(:exsp)
+
+    worlds =
+      1..10_000
+      |> Enum.take_random(count)
+      |> Task.async_stream(fn idx -> repo.get(World, idx) end, ordered: false)
+      |> Enum.map(fn {:ok, world} ->
+        %{id: world.id, randomnumber: Rand.random_but(world.randomnumber)}
+      end)
+
+    repo.insert_all(World, worlds,
+      on_conflict: :replace_all,
+      conflict_target: [:id],
+      returning: true
+    )
+  end
+end
+```
+
+```elixir
+defmodule T.AsyncExspInsertAllEnum do
+  def run(count, repo) do
+    :rand.seed(:exsp)
+
+    worlds =
+      1..10_000
+      |> Enum.take_random(count)
+      |> Task.async_stream(fn idx -> repo.get(World, idx) end, ordered: false)
+      |> Enum.map(fn {:ok, world} ->
+        %{id: world.id, randomnumber: Rand.random_but(world.randomnumber)}
+      end)
+
+    repo.insert_all(World, worlds,
+      on_conflict: :replace_all,
+      conflict_target: [:id],
+      returning: true
+    )
+  end
+end
+```
+
+```elixir
+defmodule T.SyncExspInsertAllEnum do
+  def run(count, repo) do
+    :rand.seed(:exsp)
+
+    worlds =
+      1..10_000
+      |> Enum.take_random(count)
+      |> Enum.map(fn idx -> repo.get(World, idx) end, ordered: false)
+      |> Enum.map(fn {:ok, world} ->
+        %{id: world.id, randomnumber: Rand.random_but(world.randomnumber)}
+      end)
+
+    repo.insert_all(World, worlds,
+      on_conflict: :replace_all,
+      conflict_target: [:id],
+      returning: true
+    )
+  end
+end
+```
+
+```elixir
+defmodule T.CheckoutExspInsertAllEnum do
+  def run(count, repo) do
+    :rand.seed(:exsp)
+
+    worlds =
+      repo.checkout(fn ->
+        1..10_000
+        |> Enum.take_random(count)
+        |> Enum.map(fn idx -> repo.get(World, idx) end)
+        |> Enum.map(fn world ->
+          %{id: world.id, randomnumber: Rand.random_but(world.randomnumber)}
+        end)
+      end)
+
+    repo.insert_all(World, worlds,
+      on_conflict: :replace_all,
+      conflict_target: [:id],
+      returning: true
+    )
+  end
+end
+```
+
+```elixir
+defmodule DumbRepo do
+  def get(_schema, _id), do: %{randomnumber: Rand.id()}
+
+  def update(schema, updates), do: Map.merge(schema, Map.new(updates))
+
+  def checkout(cb), do: cb.()
+end
+```
+
+```elixir
+bench = fn repo ->
+  Benchee.run(
+    %{
+      "Current" => fn s -> T.Current.run(s, repo) end,
+      "CurrentExsp" => fn s -> T.CurrentExsp.run(s, repo) end,
+      "CheckoutExspInsertAllEnum" => fn s -> T.CheckoutExspInsertAllEnum.run(s, repo) end,
+      "AsyncExspInsertAllEnum" => fn s -> T.AsyncExspInsertAllEnum.run(s, repo) end,
+      "SyncExspInsertAllEnum" => fn s -> T.AsyncExspInsertAllEnum.run(s, repo) end
+    },
+    inputs: %{
+      # one: 1,
+      # small: 10,
+      # medium: 100,
+      large: 500
+    }
+  )
+end
+```
+
+```elixir
+defmodule T.Repo do
+  use Ecto.Repo, adapter: Ecto.Adapters.Postgres, otp_app: :none
+end
+
+defmodule T.Migration.CreateWorld do
+  use Ecto.Migration
+
+  def change do
+    create table(:worlds) do
+      add(:randomnumber, :integer, null: false)
+    end
+  end
+end
+
+_ =
+  T.Repo.start_link(
+    database: "postgres",
+    username: "postgres",
+    password: "postgres",
+    hostname: "localhost",
+    pool_size: 40,
+    log: false
+  )
+
+Ecto.Migrator.run(T.Repo, [{0, T.Migration.CreateWorld}], :up, all: true)
+
+defmodule World do
+  use Ecto.Schema
+
+  schema "worlds" do
+    field(:randomnumber, :integer)
+  end
+end
+
+defmodule RealRepo do
+  defdelegate get(schema, id), to: T.Repo
+
+  def update(schema, updates) do
+    schema
+    |> Ecto.Changeset.change(updates)
+    |> T.Repo.update!()
+  end
+
+  defdelegate checkout(cb), to: T.Repo
+
+  defdelegate insert_all(schema, entries, opts), to: T.Repo
+
+  def seed do
+    if not T.Repo.exists?(World) do
+      worlds = for _ <- 1..10_000, do: %{randomnumber: :rand.uniform(10_000)}
+
+      T.Repo.insert_all(World, worlds)
+    end
+  end
+end
+
+RealRepo.seed()
+```
+
+```elixir
+bench.(RealRepo)
+```
